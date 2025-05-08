@@ -19,10 +19,10 @@ data class DetectionResult(
 
 class YoloTFLiteHelper(context: Context) {
     private val interpreter: Interpreter
-    private val inputSize = 640 // Match model input size
+    private val inputSize = 1280 // Updated to match Python code
     private val confidenceThreshold = 0.5f
     private val iouThreshold = 0.4f
-    private val numClasses = 1 // Adjust based on your model (e.g., 80 for COCO)
+    private val numClasses = 1 // Adjust based on your model (e.g., 1 for single class)
 
     init {
         try {
@@ -44,8 +44,8 @@ class YoloTFLiteHelper(context: Context) {
             val resizedBitmap = Bitmap.createScaledBitmap(bitmap, inputSize, inputSize, true)
             val inputBuffer = convertBitmapToByteBuffer(resizedBitmap)
 
-            // Prepare output buffer based on model output shape
-            val outputShape = interpreter.getOutputTensor(0).shape() // e.g., [1, 25200, 6]
+            // Prepare output buffer based on model output shape [1, 8, 33600]
+            val outputShape = interpreter.getOutputTensor(0).shape() // e.g., [1, 8, 33600]
             val outputBuffer = Array(1) { Array(outputShape[1]) { FloatArray(outputShape[2]) } }
 
             // Run inference
@@ -77,20 +77,22 @@ class YoloTFLiteHelper(context: Context) {
     private fun processOutput(output: Array<FloatArray>): List<DetectionResult> {
         val detections = mutableListOf<DetectionResult>()
 
-        for (det in output) {
-            val x = det[0]
-            val y = det[1]
-            val w = det[2]
-            val h = det[3]
-            val confidence = det[4]
+        // Output shape: [8, 33600] where first 4 are box coordinates, next 4 are class probabilities
+        for (i in 0 until output[0].size) { // Iterate over 33600 detections
+            val x = output[0][i] // Center x
+            val y = output[1][i] // Center y
+            val w = output[2][i] // Width
+            val h = output[3][i] // Height
+            val confidence = output[4][i] // Objectness score
 
             // Find the class with the highest probability
             var maxClassScore = 0f
             var classIndex = -1
-            for (i in 5 until det.size) {
-                if (det[i] > maxClassScore) {
-                    maxClassScore = det[i]
-                    classIndex = i - 5
+            for (j in 0 until numClasses) {
+                val classScore = output[4 + j][i]
+                if (classScore > maxClassScore) {
+                    maxClassScore = classScore
+                    classIndex = j
                 }
             }
 
