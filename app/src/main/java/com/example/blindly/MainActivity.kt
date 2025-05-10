@@ -154,7 +154,6 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                         2 -> hingeDetected = true // Class 2: hinge
                     }
                 }
-
                 if (doorDetected) {
                     val centerX = results.first { it.classIndex == 0 }.boundingBox.centerX()
                     val imageWidth = bitmap.width
