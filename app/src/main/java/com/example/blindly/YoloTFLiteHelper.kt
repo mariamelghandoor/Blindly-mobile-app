@@ -17,24 +17,24 @@ data class DetectionResult(
     val classIndex: Int
 )
 
-class YoloTFLiteHelper(context: Context) {
+class YoloTFLiteHelper(context: Context, modelFileName: String) {
     private val interpreter: Interpreter
-    private val inputSize = 1280 // Updated to match Python code
+    private val inputSize = 1280
     private val confidenceThreshold = 0.5f
     private val iouThreshold = 0.4f
-    private val numClasses = 1 // Adjust based on your model (e.g., 1 for single class)
+    private val numClasses = if (modelFileName.contains("openclose")) 3 else 3 // 3 for open/close/semi-open, 3 for doorSSSSSS/knob/hinge
 
     init {
         try {
-            val assetFileDescriptor = context.assets.openFd("best32.tflite")
+            val assetFileDescriptor = context.assets.openFd(modelFileName)
             val inputStream: InputStream = assetFileDescriptor.createInputStream()
             val byteBuffer = convertStreamToByteBuffer(inputStream)
             interpreter = Interpreter(byteBuffer)
-            Log.d("YoloTFLiteHelper", "Input shape: ${interpreter.getInputTensor(0).shape().contentToString()}")
-            Log.d("YoloTFLiteHelper", "Input type: ${interpreter.getInputTensor(0).dataType()}")
-            Log.d("YoloTFLiteHelper", "Output shape: ${interpreter.getOutputTensor(0).shape().contentToString()}")
+            Log.d("YoloTFLiteHelper", "Model: $modelFileName, Input shape: ${interpreter.getInputTensor(0).shape().contentToString()}")
+            Log.d("YoloTFLiteHelper", "Model: $modelFileName, Input type: ${interpreter.getInputTensor(0).dataType()}")
+            Log.d("YoloTFLiteHelper", "Model: $modelFileName, Output shape: ${interpreter.getOutputTensor(0).shape().contentToString()}")
         } catch (e: Exception) {
-            throw RuntimeException("Failed to load YOLOv8 model: ${e.message}", e)
+            throw RuntimeException("Failed to load YOLO model ($modelFileName): ${e.message}", e)
         }
     }
 
@@ -45,7 +45,7 @@ class YoloTFLiteHelper(context: Context) {
             val inputBuffer = convertBitmapToByteBuffer(resizedBitmap)
 
             // Prepare output buffer based on model output shape [1, 8, 33600]
-            val outputShape = interpreter.getOutputTensor(0).shape() // e.g., [1, 8, 33600]
+            val outputShape = interpreter.getOutputTensor(0).shape()
             val outputBuffer = Array(1) { Array(outputShape[1]) { FloatArray(outputShape[2]) } }
 
             // Run inference
@@ -54,7 +54,7 @@ class YoloTFLiteHelper(context: Context) {
             // Process output
             return processOutput(outputBuffer[0])
         } catch (e: Exception) {
-            Log.e("YoloTFLiteHelper", "Detection failed: ${e.message}", e)
+            Log.e("YoloTFLiteHelper", "Detection failed for : ${e.message}", e)
             return emptyList()
         }
     }
@@ -77,7 +77,7 @@ class YoloTFLiteHelper(context: Context) {
     private fun processOutput(output: Array<FloatArray>): List<DetectionResult> {
         val detections = mutableListOf<DetectionResult>()
 
-        // Output shape: [8, 33600] where first 4 are box coordinates, next 4 are class probabilities
+        // Output shape: [8, 33600] where first 4 are box coordinates, next are class probabilities
         for (i in 0 until output[0].size) { // Iterate over 33600 detections
             val x = output[0][i] // Center x
             val y = output[1][i] // Center y

@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.os.Bundle
+import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -26,11 +27,14 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import java.io.File
+import java.util.*
 
-class MainActivity : ComponentActivity() {
+class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     private lateinit var yoloHelper: YoloTFLiteHelper
+    private lateinit var openCloseYoloHelper: YoloTFLiteHelper
     private lateinit var imageCapture: ImageCapture
+    private lateinit var textToSpeech: TextToSpeech
 
     // Request camera permissions at runtime
     private val requestPermissionLauncher =
@@ -45,8 +49,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Initialize YOLO TFLite helper
-        yoloHelper = YoloTFLiteHelper(this)
+        // Initialize YOLO TFLite helpers (both models in assets)
+        yoloHelper = YoloTFLiteHelper(this, "doordetectionyolo11_float32.tflite")
+        openCloseYoloHelper = YoloTFLiteHelper(this, "dooropenclose_float32.tflite")
+
+        // Initialize Text-to-Speech
+        textToSpeech = TextToSpeech(this, this)
 
         // Set Compose UI
         setContent {
@@ -64,6 +72,15 @@ class MainActivity : ComponentActivity() {
             startCamera()
         } else {
             requestPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            textToSpeech.language = Locale.US
+        } else {
+            Log.e("TTS", "Text-to-Speech initialization failed")
+            Toast.makeText(this, "Text-to-Speech initialization failed", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -119,21 +136,88 @@ class MainActivity : ComponentActivity() {
 
     private fun runDetection(bitmap: Bitmap) {
         try {
-            Log.d("Debug", "Starting YOLOv8 detection with bitmap ${bitmap.width}x${bitmap.height}")
+            Log.d("Debug", "Starting YOLO detection with bitmap ${bitmap.width}x${bitmap.height}")
             val results = yoloHelper.detect(bitmap)
             if (results.isEmpty()) {
                 Log.d("DetectionResult", "No objects detected")
                 Toast.makeText(this, "No objects detected", Toast.LENGTH_SHORT).show()
+                speak("No door detected in sight. Try turning or walking.")
             } else {
+                var doorDetected = false
+                var knobDetected = false
+                var hingeDetected = false
                 for (result in results) {
                     Log.d("DetectionResult", "Class: ${result.classIndex}, Score: ${result.score}, Box: ${result.boundingBox}")
+                    when (result.classIndex) {
+                        0 -> doorDetected = true // Class 0: door
+                        1 -> knobDetected = true // Class 1: knob
+                        2 -> hingeDetected = true // Class 2: hinge
+                    }
+                }
+
+                if (doorDetected) {
+                    val centerX = results.first { it.classIndex == 0 }.boundingBox.centerX()
+                    val imageWidth = bitmap.width
+                    if (centerX < imageWidth / 3) {
+                        speak("Door detected on the left. Turn slightly left and walk forward.")
+                    } else if (centerX > 2 * imageWidth / 3) {
+                        speak("Door detected on the right. Turn slightly right and walk forward.")
+                    } else {
+                        speak("Door detected ahead. Walk straight forward.")
+                    }
+                } else if (knobDetected) {
+                    val centerX = results.first { it.classIndex == 1 }.boundingBox.centerX()
+                    val imageWidth = bitmap.width
+                    if (centerX < imageWidth / 3) {
+                        speak("Door knob detected on the left. Turn slightly left and approach to open.")
+                    } else if (centerX > 2 * imageWidth / 3) {
+                        speak("Door knob detected on the right. Turn slightly right and approach to open.")
+                    } else {
+                        speak("Door knob detected ahead. Walk forward and prepare to open the door.")
+                    }
+                } else if (hingeDetected) {
+                    // Run the open/close YOLO model
+                    val openCloseResults = openCloseYoloHelper.detect(bitmap)
+                    var doorState = "closed" // Default
+                    for (result in openCloseResults) {
+                        when (result.classIndex) {
+                            0 -> { // Class 0: open
+                                doorState = "open"
+                                break
+                            }
+                            1 -> { // Class 1: closed
+                                doorState = "closed"
+                                break
+                            }
+                            2 -> { // Class 2: semi-open
+                                doorState = "semi-open"
+                                break
+                            }
+                        }
+                    }
+                    when (doorState) {
+                        "open" -> speak("Open door detected. Walk forward to pass through.")
+                        "closed" -> speak("Closed door detected. Approach the door and check for a knob to open.")
+                        "semi-open" -> speak("Semi-open door detected. Approach cautiously and push to open fully or pass through carefully.")
+                    }
                 }
                 Toast.makeText(this, "${results.size} objects detected", Toast.LENGTH_SHORT).show()
             }
         } catch (e: Exception) {
-            Log.e("DetectionError", "YOLOv8 detection failed: ${e.message}", e)
+            Log.e("DetectionError", "YOLO detection failed: ${e.message}", e)
             Toast.makeText(this, "Detection failed: ${e.message}", Toast.LENGTH_LONG).show()
+            speak("Detection failed. Please try again.")
         }
+    }
+
+    private fun speak(text: String) {
+        textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        textToSpeech.stop()
+        textToSpeech.shutdown()
     }
 }
 
