@@ -36,6 +36,17 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private lateinit var imageCapture: ImageCapture
     private lateinit var textToSpeech: TextToSpeech
 
+    // Class indices for doordetectionyolo11_float32.tflite (from data.yaml)
+    private val DOOR_CLASS = 0
+    private val HINGED_CLASS = 1
+    private val KNOB_CLASS = 2
+    private val LEVER_CLASS = 3
+
+    // Class indices for dooropenclose_float32.tflite (closed, open, semi-open)
+    private val CLOSED_CLASS = 0
+    private val OPEN_CLASS = 1
+    private val SEMI_OPEN_CLASS = 2
+
     // Request camera permissions at runtime
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted: Boolean ->
@@ -49,11 +60,11 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Initialize YOLO TFLite helpers (both models in assets)
-        yoloHelper = YoloTFLiteHelper(this, "doordetectionyolo11_float32.tflite")
-        openCloseYoloHelper = YoloTFLiteHelper(this, "dooropenclose_float32.tflite")
+        // Initialize YOLO TFLite helpers for both models from assets
+        yoloHelper = YoloTFLiteHelper(this, "doordetectionyolo11_float32.tflite") // For door, hinged, knob, lever detection
+        openCloseYoloHelper = YoloTFLiteHelper(this, "dooropenclose_float32.tflite") // For closed, open, semi-open detection
 
-        // Initialize Text-to-Speech
+        // Initialize Text-to-Speech (local, offline)
         textToSpeech = TextToSpeech(this, this)
 
         // Set Compose UI
@@ -136,7 +147,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     private fun runDetection(bitmap: Bitmap) {
         try {
-            Log.d("Debug", "Starting YOLO detection with bitmap ${bitmap.width}x${bitmap.height}")
+            // Step 1: Use doordetectionyolo11_float32.tflite for initial detection
+            Log.d("Debug", "Starting initial detection with doordetectionyolo11_float32.tflite on bitmap ${bitmap.width}x${bitmap.height}")
             val results = yoloHelper.detect(bitmap)
             if (results.isEmpty()) {
                 Log.d("DetectionResult", "No objects detected")
@@ -144,59 +156,82 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 speak("No door detected in sight. Try turning or walking.")
             } else {
                 var doorDetected = false
+                var hingedDetected = false
                 var knobDetected = false
-                var hingeDetected = false
+                var leverDetected = false
                 for (result in results) {
                     Log.d("DetectionResult", "Class: ${result.classIndex}, Score: ${result.score}, Box: ${result.boundingBox}")
                     when (result.classIndex) {
-                        0 -> doorDetected = true // Class 0: door
-                        1 -> knobDetected = true // Class 1: knob
-                        2 -> hingeDetected = true // Class 2: hinge
+                        DOOR_CLASS -> doorDetected = true
+                        HINGED_CLASS -> hingedDetected = true
+                        KNOB_CLASS -> knobDetected = true
+                        LEVER_CLASS -> leverDetected = true
                     }
                 }
+
+                // Step 2: Provide navigation instructions based on initial detection
                 if (doorDetected) {
-                    val centerX = results.first { it.classIndex == 0 }.boundingBox.centerX()
+                    val centerX = results.first { it.classIndex == DOOR_CLASS }.boundingBox.centerX()
                     val imageWidth = bitmap.width
-                    if (centerX < imageWidth / 3) {
+                    Log.d("PositionDebug", "Door detected: centerX=$centerX, imageWidth=$imageWidth, centerX/imageWidth=${centerX/imageWidth}")
+                    // Middle region: 20% to 80% of image width
+                    if (centerX < imageWidth / 5) { // Left: 0 to 20%
                         speak("Door detected on the left. Turn slightly left and walk forward.")
-                    } else if (centerX > 2 * imageWidth / 3) {
+                    } else if (centerX > 4 * imageWidth / 5) { // Right: 80% to 100%
                         speak("Door detected on the right. Turn slightly right and walk forward.")
-                    } else {
+                    } else { // Middle: 20% to 80%
                         speak("Door detected ahead. Walk straight forward.")
                     }
                 } else if (knobDetected) {
-                    val centerX = results.first { it.classIndex == 1 }.boundingBox.centerX()
+                    val centerX = results.first { it.classIndex == KNOB_CLASS }.boundingBox.centerX()
                     val imageWidth = bitmap.width
-                    if (centerX < imageWidth / 3) {
+                    Log.d("PositionDebug", "Knob detected: centerX=$centerX, imageWidth=$imageWidth, centerX/imageWidth=${centerX/imageWidth}")
+                    // Middle region: 20% to 80% of image width
+                    if (centerX < imageWidth / 5) { // Left: 0 to 20%
                         speak("Door knob detected on the left. Turn slightly left and approach to open.")
-                    } else if (centerX > 2 * imageWidth / 3) {
+                    } else if (centerX > 4 * imageWidth / 5) { // Right: 80% to 100%
                         speak("Door knob detected on the right. Turn slightly right and approach to open.")
-                    } else {
+                    } else { // Middle: 20% to 80%
                         speak("Door knob detected ahead. Walk forward and prepare to open the door.")
                     }
-                } else if (hingeDetected) {
-                    // Run the open/close YOLO model
+                } else if (leverDetected) {
+                    val centerX = results.first { it.classIndex == LEVER_CLASS }.boundingBox.centerX()
+                    val imageWidth = bitmap.width
+                    Log.d("PositionDebug", "Lever detected: centerX=$centerX, imageWidth=$imageWidth, centerX/imageWidth=${centerX/imageWidth}")
+                    // Middle region: 20% to 80% of image width
+                    if (centerX < imageWidth / 5) { // Left: 0 to 20%
+                        speak("Door lever detected on the left. Turn slightly left and approach to open.")
+                    } else if (centerX > 4 * imageWidth / 5) { // Right: 80% to 100%
+                        speak("Door lever detected on the right. Turn slightly right and approach to open.")
+                    } else { // Middle: 20% to 80%
+                        speak("Door lever detected ahead. Walk forward and prepare to open the door.")
+                    }
+                } else if (hingedDetected) {
+                    // Step 3: Use dooropenclose_float32.tflite to confirm door state when hinges are detected
+                    Log.d("Debug", "Hinges detected, using dooropenclose_float32.tflite to check door state")
                     val openCloseResults = openCloseYoloHelper.detect(bitmap)
-                    var doorState = "closed" // Default
+                    var doorState = "closed" // Default to closed if no state is detected
                     for (result in openCloseResults) {
+                        Log.d("OpenCloseResult", "Class: ${result.classIndex}, Score: ${result.score}, Box: ${result.boundingBox}")
                         when (result.classIndex) {
-                            0 -> { // Class 0: open
-                                doorState = "open"
-                                break
-                            }
-                            1 -> { // Class 1: closed
+                            CLOSED_CLASS -> {
                                 doorState = "closed"
                                 break
                             }
-                            2 -> { // Class 2: semi-open
+                            OPEN_CLASS -> {
+                                doorState = "open"
+                                break
+                            }
+                            SEMI_OPEN_CLASS -> {
                                 doorState = "semi-open"
                                 break
                             }
                         }
                     }
+                    // Step 4: Provide instructions based on door state
                     when (doorState) {
+                        "closed" -> speak("Closed door detected. Approach the door and check for a knob or lever to open.")
                         "open" -> speak("Open door detected. Walk forward to pass through.")
-                        "closed" -> speak("Closed door detected. Approach the door and check for a knob to open.")
                         "semi-open" -> speak("Semi-open door detected. Approach cautiously and push to open fully or pass through carefully.")
                     }
                 }

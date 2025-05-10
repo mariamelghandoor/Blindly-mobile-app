@@ -49,8 +49,7 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.org.tensorflow.tensorflowlite) // Kept only tensorflow-lite
-    // Removed libs.org.tensorflow.tflite.support and libs.org.tensorflow.tflite.task
-    implementation(libs.androidx.camera.core)
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.4")
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)

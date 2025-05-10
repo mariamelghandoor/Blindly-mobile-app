@@ -22,13 +22,17 @@ class YoloTFLiteHelper(context: Context, modelFileName: String) {
     private val inputSize = 1280
     private val confidenceThreshold = 0.5f
     private val iouThreshold = 0.4f
-    private val numClasses = if (modelFileName.contains("openclose")) 3 else 3 // 3 for open/close/semi-open, 3 for doorSSSSSS/knob/hinge
+    private val numClasses = if (modelFileName.contains("openclose")) 3 else 4 // 3 for closed/open/semi-open, 4 for door/hinged/knob/lever
 
     init {
         try {
+            // Load model from assets folder
             val assetFileDescriptor = context.assets.openFd(modelFileName)
             val inputStream: InputStream = assetFileDescriptor.createInputStream()
             val byteBuffer = convertStreamToByteBuffer(inputStream)
+            val options = Interpreter.Options().apply {
+                setUseNNAPI(true) // Enable NNAPI
+            }
             interpreter = Interpreter(byteBuffer)
             Log.d("YoloTFLiteHelper", "Model: $modelFileName, Input shape: ${interpreter.getInputTensor(0).shape().contentToString()}")
             Log.d("YoloTFLiteHelper", "Model: $modelFileName, Input type: ${interpreter.getInputTensor(0).dataType()}")
@@ -79,10 +83,10 @@ class YoloTFLiteHelper(context: Context, modelFileName: String) {
 
         // Output shape: [8, 33600] where first 4 are box coordinates, next are class probabilities
         for (i in 0 until output[0].size) { // Iterate over 33600 detections
-            val x = output[0][i] // Center x
-            val y = output[1][i] // Center y
-            val w = output[2][i] // Width
-            val h = output[3][i] // Height
+            val x = output[0][i] * inputSize // Scale if normalized
+            val y = output[1][i] * inputSize
+            val w = output[2][i] * inputSize
+            val h = output[3][i] * inputSize
             val confidence = output[4][i] // Objectness score
 
             // Find the class with the highest probability
