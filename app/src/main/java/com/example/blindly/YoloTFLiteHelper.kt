@@ -22,7 +22,7 @@ class YoloTFLiteHelper(context: Context, modelFileName: String) {
     private val inputSize = 1280
     private val confidenceThreshold = 0.5f
     private val iouThreshold = 0.4f
-    private val numClasses = if (modelFileName.contains("openclose")) 3 else 4 // 3 for closed/open/semi-open, 4 for door/hinged/knob/lever
+    private val numClasses = 4 // For door, hinged, knob, lever
 
     init {
         try {
@@ -134,7 +134,7 @@ class YoloTFLiteHelper(context: Context, modelFileName: String) {
         val x2 = minOf(box1.right, box2.right)
         val y2 = minOf(box1.bottom, box2.bottom)
 
-        val intersection = maxOf(0f, x2 - x1) * maxOf(0f, y2 - y1)
+        var intersection = maxOf(0f, x2 - x1) * maxOf(0f, y2 - y1)
         val area1 = (box1.right - box1.left) * (box1.bottom - box1.top)
         val area2 = (box2.right - box2.left) * (box2.bottom - box2.top)
         return if (area1 + area2 - intersection > 0) intersection / (area1 + area2 - intersection) else 0f

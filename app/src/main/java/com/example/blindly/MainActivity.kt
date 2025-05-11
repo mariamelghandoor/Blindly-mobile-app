@@ -32,7 +32,6 @@ import java.util.*
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     private lateinit var yoloHelper: YoloTFLiteHelper
-    private lateinit var openCloseYoloHelper: YoloTFLiteHelper
     private lateinit var imageCapture: ImageCapture
     private lateinit var textToSpeech: TextToSpeech
 
@@ -41,11 +40,6 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private val HINGED_CLASS = 1
     private val KNOB_CLASS = 2
     private val LEVER_CLASS = 3
-
-    // Class indices for dooropenclose_float32.tflite (closed, open, semi-open)
-    private val CLOSED_CLASS = 0
-    private val OPEN_CLASS = 1
-    private val SEMI_OPEN_CLASS = 2
 
     // Request camera permissions at runtime
     private val requestPermissionLauncher =
@@ -60,9 +54,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Initialize YOLO TFLite helpers for both models from assets
+        // Initialize YOLO TFLite helper for door detection model from assets
         yoloHelper = YoloTFLiteHelper(this, "doordetectionyolo11_float32.tflite") // For door, hinged, knob, lever detection
-        openCloseYoloHelper = YoloTFLiteHelper(this, "dooropenclose_float32.tflite") // For closed, open, semi-open detection
 
         // Initialize Text-to-Speech (local, offline)
         textToSpeech = TextToSpeech(this, this)
@@ -147,8 +140,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     private fun runDetection(bitmap: Bitmap) {
         try {
-            // Step 1: Use doordetectionyolo11_float32.tflite for initial detection
-            Log.d("Debug", "Starting initial detection with doordetectionyolo11_float32.tflite on bitmap ${bitmap.width}x${bitmap.height}")
+            // Use doordetectionyolo11_float32.tflite for detection
+            Log.d("Debug", "Starting detection with doordetectionyolo11_float32.tflite on bitmap ${bitmap.width}x${bitmap.height}")
             val results = yoloHelper.detect(bitmap)
             if (results.isEmpty()) {
                 Log.d("DetectionResult", "No objects detected")
@@ -156,20 +149,18 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 speak("No door detected in sight. Try turning or walking.")
             } else {
                 var doorDetected = false
-                var hingedDetected = false
                 var knobDetected = false
                 var leverDetected = false
                 for (result in results) {
                     Log.d("DetectionResult", "Class: ${result.classIndex}, Score: ${result.score}, Box: ${result.boundingBox}")
                     when (result.classIndex) {
                         DOOR_CLASS -> doorDetected = true
-                        HINGED_CLASS -> hingedDetected = true
                         KNOB_CLASS -> knobDetected = true
                         LEVER_CLASS -> leverDetected = true
                     }
                 }
 
-                // Step 2: Provide navigation instructions based on initial detection
+                // Provide navigation instructions based on detection
                 if (doorDetected) {
                     val centerX = results.first { it.classIndex == DOOR_CLASS }.boundingBox.centerX()
                     val imageWidth = bitmap.width
@@ -206,34 +197,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                     } else { // Middle: 20% to 80%
                         speak("Door lever detected ahead. Walk forward and prepare to open the door.")
                     }
-                } else if (hingedDetected) {
-                    // Step 3: Use dooropenclose_float32.tflite to confirm door state when hinges are detected
-                    Log.d("Debug", "Hinges detected, using dooropenclose_float32.tflite to check door state")
-                    val openCloseResults = openCloseYoloHelper.detect(bitmap)
-                    var doorState = "closed" // Default to closed if no state is detected
-                    for (result in openCloseResults) {
-                        Log.d("OpenCloseResult", "Class: ${result.classIndex}, Score: ${result.score}, Box: ${result.boundingBox}")
-                        when (result.classIndex) {
-                            CLOSED_CLASS -> {
-                                doorState = "closed"
-                                break
-                            }
-                            OPEN_CLASS -> {
-                                doorState = "open"
-                                break
-                            }
-                            SEMI_OPEN_CLASS -> {
-                                doorState = "semi-open"
-                                break
-                            }
-                        }
-                    }
-                    // Step 4: Provide instructions based on door state
-                    when (doorState) {
-                        "closed" -> speak("Closed door detected. Approach the door and check for a knob or lever to open.")
-                        "open" -> speak("Open door detected. Walk forward to pass through.")
-                        "semi-open" -> speak("Semi-open door detected. Approach cautiously and push to open fully or pass through carefully.")
-                    }
+                } else {
+                    speak("No actionable objects detected. Try turning or walking.")
                 }
                 Toast.makeText(this, "${results.size} objects detected", Toast.LENGTH_SHORT).show()
             }
