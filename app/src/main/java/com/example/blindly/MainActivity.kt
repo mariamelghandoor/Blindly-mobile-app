@@ -28,6 +28,8 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import java.io.File
 import java.util.*
+import kotlin.math.abs
+import java.util.LinkedList
 
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
@@ -55,7 +57,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         super.onCreate(savedInstanceState)
 
         // Initialize YOLO TFLite helper for door detection model from assets
-        yoloHelper = YoloTFLiteHelper(this, "doordetectionyolo11_float32.tflite") // For door, hinged, knob, lever detection
+        yoloHelper = YoloTFLiteHelper(this, "doordetectionyolo11_float32.tflite")
 
         // Initialize Text-to-Speech (local, offline)
         textToSpeech = TextToSpeech(this, this)
@@ -104,7 +106,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             cameraProvider.bindToLifecycle(
                 this as LifecycleOwner,
                 cameraSelector,
-                preview,
+                preview, // Corrected from previewEmail to preview
                 imageCapture
             )
 
@@ -122,7 +124,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                     val bitmap = BitmapFactory.decodeFile(photoFile.absolutePath)
                     val rotatedBitmap = rotateBitmapIfNeeded(bitmap)
-                    runDetection(rotatedBitmap)
+                    processImage(rotatedBitmap)
                 }
 
                 override fun onError(exception: ImageCaptureException) {
@@ -138,9 +140,17 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     }
 
-    private fun runDetection(bitmap: Bitmap) {
+    private fun processImage(bitmap: Bitmap) {
         try {
-            // Use doordetectionyolo11_float32.tflite for detection
+            // Step 1: Check for obstacles in the lower part of the image
+            if (detectObstacle(bitmap)) {
+                Log.d("ObstacleDetection", "Obstacle detected in lower region")
+                speak("Obstacle detected ahead. Stop immediately.")
+                Toast.makeText(this, "Obstacle detected", Toast.LENGTH_SHORT).show()
+                return // Prioritize obstacle warning over door detection
+            }
+
+            // Step 2: Run YOLO detection for doors, knobs, levers
             Log.d("Debug", "Starting detection with doordetectionyolo11_float32.tflite on bitmap ${bitmap.width}x${bitmap.height}")
             val results = yoloHelper.detect(bitmap)
             if (results.isEmpty()) {
@@ -207,6 +217,112 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             Toast.makeText(this, "Detection failed: ${e.message}", Toast.LENGTH_LONG).show()
             speak("Detection failed. Please try again.")
         }
+    }
+
+
+    private fun detectObstacle(bitmap: Bitmap): Boolean {
+        // Analyze the lower 30% of the image for distinct regions (potential obstacles)
+        val height = bitmap.height
+        val width = bitmap.width
+        val startY = (height * 0.7).toInt() // Start from 70% down the image
+        val lowerRegionHeight = height - startY
+
+        try {
+            // Step 1: Convert lower region to grayscale and calculate a threshold
+            val grayValues = mutableListOf<Int>()
+            for (y in startY until height) {
+                for (x in 0 until width) {
+                    val pixel = bitmap.getPixel(x, y)
+                    // Convert to grayscale: 0.299R + 0.587G + 0.114B
+                    val gray = (0.299f * ((pixel shr 16) and 0xFF) +
+                            0.587f * ((pixel shr 8) and 0xFF) +
+                            0.114f * (pixel and 0xFF)).toInt()
+                    grayValues.add(gray)
+                }
+            }
+
+            // Calculate a simple threshold using the mean grayscale value
+            val meanGray = if (grayValues.isNotEmpty()) grayValues.sum() / grayValues.size else 128
+            val threshold = meanGray - 20 // Lower threshold to capture darker objects like the stove
+            Log.d("ObstacleDetection", "Mean Gray: $meanGray, Threshold: $threshold")
+
+            // Step 2: Binarize the image (1 for foreground, 0 for background)
+            val binary = Array(lowerRegionHeight) { IntArray(width) }
+            for (y in startY until height) {
+                for (x in 0 until width) {
+                    val pixel = bitmap.getPixel(x, y)
+                    val gray = (0.299f * ((pixel shr 16) and 0xFF) +
+                            0.587f * ((pixel shr 8) and 0xFF) +
+                            0.114f * (pixel and 0xFF)).toInt()
+                    binary[y - startY][x] = if (gray < threshold) 1 else 0 // Darker pixels are foreground
+                }
+            }
+
+            // Step 3: Find the largest contiguous region using an iterative flood-fill
+            var maxRegionSize = 0
+            val visited = Array(lowerRegionHeight) { BooleanArray(width) }
+            val queue = LinkedList<Pair<Int, Int>>()
+
+            for (y in 0 until lowerRegionHeight) {
+                for (x in 0 until width) {
+                    if (binary[y][x] == 1 && !visited[y][x]) {
+                        queue.offer(Pair(y, x))
+                        visited[y][x] = true
+                        var regionSize = 0
+
+                        while (queue.isNotEmpty()) {
+                            val (currentY, currentX) = queue.poll()
+                            regionSize++
+
+                            // Check all four directions
+                            for ((dy, dx) in listOf(Pair(-1, 0), Pair(1, 0), Pair(0, -1), Pair(0, 1))) {
+                                val newY = currentY + dy
+                                val newX = currentX + dx
+                                if (newY in 0 until lowerRegionHeight && newX in 0 until width &&
+                                    !visited[newY][newX] && binary[newY][newX] == 1) {
+                                    queue.offer(Pair(newY, newX))
+                                    visited[newY][newX] = true
+                                }
+                            }
+                        }
+                        maxRegionSize = maxOf(maxRegionSize, regionSize)
+                    }
+                }
+            }
+
+            // Step 4: Determine if the largest region indicates an obstacle
+            val totalPixels = lowerRegionHeight * width
+            val regionProportion = maxRegionSize.toFloat() / totalPixels
+            Log.d("ObstacleDetection", "Largest region size: $maxRegionSize, Proportion: $regionProportion")
+
+            // Consider it an obstacle if the region is significant (e.g., >15% of the lower region)
+            val proportionThreshold = 0.15f
+            val isObstacle = regionProportion > proportionThreshold
+            Log.d("ObstacleDetection", "Obstacle detected: $isObstacle")
+
+            return isObstacle
+        } catch (e: Exception) {
+            Log.e("ObstacleDetection", "Error in detectObstacle: ${e.message}", e)
+            return false // Fallback to avoid crash
+        }
+    }
+
+    // Helper function: Flood-fill algorithm to find the size of a contiguous region
+    private fun floodFill(binary: Array<IntArray>, visited: Array<BooleanArray>, y: Int, x: Int, height: Int, width: Int): Int {
+        if (y < 0 || y >= height || x < 0 || x >= width || visited[y][x] || binary[y][x] == 0) {
+            return 0
+        }
+
+        visited[y][x] = true
+        var size = 1
+
+        // Recursively check neighboring pixels (4-directional)
+        size += floodFill(binary, visited, y - 1, x, height, width) // Up
+        size += floodFill(binary, visited, y + 1, x, height, width) // Down
+        size += floodFill(binary, visited, y, x - 1, height, width) // Left
+        size += floodFill(binary, visited, y, x + 1, height, width) // Right
+
+        return size
     }
 
     private fun speak(text: String) {
