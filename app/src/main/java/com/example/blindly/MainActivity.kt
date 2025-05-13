@@ -1,3 +1,4 @@
+
 package com.example.blindly
 
 import android.Manifest
@@ -19,6 +20,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -36,32 +39,32 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.ui.graphics.Color
-import androidx.compose.foundation.layout.Row
 
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     private lateinit var yoloHelper: YoloTFLiteHelper
     private lateinit var imageCapture: ImageCapture
     private lateinit var textToSpeech: TextToSpeech
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var isCameraRunning = false
 
     // Class indices for doordetectionyolo11_float32.tflite (from data.yaml)
     private val DOOR_CLASS = 0
     private val HINGED_CLASS = 1
     private val KNOB_CLASS = 2
     private val LEVER_CLASS = 3
-    // Add these properties to MainActivity class
+
     private var isAutoCaptureRunning = false
     private val autoCaptureHandler = Handler(Looper.getMainLooper())
     private val autoCaptureRunnable = object : Runnable {
         override fun run() {
-            if (isAutoCaptureRunning) {
+            if (isAutoCaptureRunning && isCameraRunning) { // Check camera state
                 takePhoto()
                 autoCaptureHandler.postDelayed(this, 5000) // 5 seconds
             }
         }
     }
 
-    // Add these functions to MainActivity class
     private fun startAutoCapture() {
         if (!isAutoCaptureRunning) {
             isAutoCaptureRunning = true
@@ -78,9 +81,6 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    // Update onDestroy to stop auto capture
-
-    // Request camera permissions at runtime
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted: Boolean ->
             if (isGranted) {
@@ -93,14 +93,11 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Initialize YOLO TFLite helper for door detection model from assets
         yoloHelper = YoloTFLiteHelper(this, "doordetectionyolo11_float32.tflite")
-
-        // Initialize Text-to-Speech (local, offline)
         textToSpeech = TextToSpeech(this, this)
 
-        // Set Compose UI
         setContent {
+            val isCameraRunning = remember { mutableStateOf(true) }
             CameraScreen(
                 onCaptureClick = { takePhoto() },
                 onAutoCaptureClick = {
@@ -110,12 +107,21 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                         startAutoCapture()
                     }
                 },
+                onToggleStreamClick = {
+                    if (isCameraRunning.value) {
+                        stopCamera()
+                        isCameraRunning.value = false
+                    } else {
+                        restartCamera()
+                        isCameraRunning.value = true
+                    }
+                },
                 isAutoCaptureRunning = isAutoCaptureRunning,
+                isCameraRunning = isCameraRunning.value,
                 lifecycleOwner = this
             )
         }
 
-        // Check camera permissions
         if (ContextCompat.checkSelfPermission(
                 this, Manifest.permission.CAMERA
             ) == PackageManager.PERMISSION_GRANTED
@@ -139,7 +145,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
 
         cameraProviderFuture.addListener({
-            val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
+            cameraProvider = cameraProviderFuture.get()
             val preview = Preview.Builder().build()
             imageCapture = ImageCapture.Builder().build()
 
@@ -147,19 +153,38 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 .requireLensFacing(CameraSelector.LENS_FACING_BACK)
                 .build()
 
-            cameraProvider.unbindAll()
-            cameraProvider.bindToLifecycle(
+            cameraProvider?.unbindAll()
+            cameraProvider?.bindToLifecycle(
                 this as LifecycleOwner,
                 cameraSelector,
-                preview, // Corrected from previewEmail to preview
+                preview,
                 imageCapture
             )
-
+            isCameraRunning = true
+            // Resume auto-capture if it was running
+            if (isAutoCaptureRunning) {
+                autoCaptureHandler.postDelayed(autoCaptureRunnable, 5000)
+            }
         }, ContextCompat.getMainExecutor(this))
     }
 
+    private fun stopCamera() {
+        cameraProvider?.unbindAll()
+        isCameraRunning = false
+        stopAutoCapture() // Stop auto-capture when camera is stopped
+        Toast.makeText(this, "Camera stream stopped", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun restartCamera() {
+        startCamera()
+        Toast.makeText(this, "Camera stream started", Toast.LENGTH_SHORT).show()
+    }
 
     private fun takePhoto() {
+        if (!isCameraRunning || cameraProvider == null) {
+            Toast.makeText(this, "Cannot capture: Camera is stopped", Toast.LENGTH_SHORT).show()
+            return
+        }
         val photoFile = File(externalCacheDir, "photo.jpg")
         val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
 
@@ -174,6 +199,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 }
 
                 override fun onError(exception: ImageCaptureException) {
+                    Log.e("CaptureError", "Error capturing photo: ${exception.message}", exception)
                     Toast.makeText(this@MainActivity, "Error capturing photo", Toast.LENGTH_SHORT).show()
                 }
             }
@@ -188,15 +214,13 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     private fun processImage(bitmap: Bitmap) {
         try {
-            // Step 1: Check for obstacles in the lower part of the image
             if (detectObstacle(bitmap)) {
                 Log.d("ObstacleDetection", "Obstacle detected in lower region")
                 speak("Obstacle detected ahead. Stop immediately.")
                 Toast.makeText(this, "Obstacle detected", Toast.LENGTH_SHORT).show()
-                return // Prioritize obstacle warning over door detection
+                return
             }
 
-            // Step 2: Run YOLO detection for doors, knobs, levers
             Log.d("Debug", "Starting detection with doordetectionyolo11_float32.tflite on bitmap ${bitmap.width}x${bitmap.height}")
             val results = yoloHelper.detect(bitmap)
             if (results.isEmpty()) {
@@ -216,41 +240,37 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                     }
                 }
 
-                // Provide navigation instructions based on detection
                 if (doorDetected) {
                     val centerX = results.first { it.classIndex == DOOR_CLASS }.boundingBox.centerX()
                     val imageWidth = bitmap.width
                     Log.d("PositionDebug", "Door detected: centerX=$centerX, imageWidth=$imageWidth, centerX/imageWidth=${centerX/imageWidth}")
-                    // Middle region: 20% to 80% of image width
-                    if (centerX < imageWidth / 5) { // Left: 0 to 20%
+                    if (centerX < imageWidth / 5) {
                         speak("Door detected on the left. Turn slightly left and walk forward.")
-                    } else if (centerX > 4 * imageWidth / 5) { // Right: 80% to 100%
+                    } else if (centerX > 4 * imageWidth / 5) {
                         speak("Door detected on the right. Turn slightly right and walk forward.")
-                    } else { // Middle: 20% to 80%
+                    } else {
                         speak("Door detected ahead. Walk straight forward.")
                     }
                 } else if (knobDetected) {
                     val centerX = results.first { it.classIndex == KNOB_CLASS }.boundingBox.centerX()
                     val imageWidth = bitmap.width
                     Log.d("PositionDebug", "Knob detected: centerX=$centerX, imageWidth=$imageWidth, centerX/imageWidth=${centerX/imageWidth}")
-                    // Middle region: 20% to 80% of image width
-                    if (centerX < imageWidth / 5) { // Left: 0 to 20%
+                    if (centerX < imageWidth / 5) {
                         speak("Door knob detected on the left. Turn slightly left and approach to open.")
-                    } else if (centerX > 4 * imageWidth / 5) { // Right: 80% to 100%
+                    } else if (centerX > 4 * imageWidth / 5) {
                         speak("Door knob detected on the right. Turn slightly right and approach to open.")
-                    } else { // Middle: 20% to 80%
+                    } else {
                         speak("Door knob detected ahead. Walk forward and prepare to open the door.")
                     }
                 } else if (leverDetected) {
                     val centerX = results.first { it.classIndex == LEVER_CLASS }.boundingBox.centerX()
                     val imageWidth = bitmap.width
                     Log.d("PositionDebug", "Lever detected: centerX=$centerX, imageWidth=$imageWidth, centerX/imageWidth=${centerX/imageWidth}")
-                    // Middle region: 20% to 80% of image width
-                    if (centerX < imageWidth / 5) { // Left: 0 to 20%
+                    if (centerX < imageWidth / 5) {
                         speak("Door lever detected on the left. Turn slightly left and approach to open.")
-                    } else if (centerX > 4 * imageWidth / 5) { // Right: 80% to 100%
+                    } else if (centerX > 4 * imageWidth / 5) {
                         speak("Door lever detected on the right. Turn slightly right and approach to open.")
-                    } else { // Middle: 20% to 80%
+                    } else {
                         speak("Door lever detected ahead. Walk forward and prepare to open the door.")
                     }
                 } else {
@@ -265,21 +285,17 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-
     private fun detectObstacle(bitmap: Bitmap): Boolean {
-        // Analyze the lower 30% of the image for distinct regions (potential obstacles)
         val height = bitmap.height
         val width = bitmap.width
-        val startY = (height * 0.7).toInt() // Start from 70% down the image
+        val startY = (height * 0.7).toInt()
         val lowerRegionHeight = height - startY
 
         try {
-            // Step 1: Convert lower region to grayscale and calculate a threshold
             val grayValues = mutableListOf<Int>()
             for (y in startY until height) {
                 for (x in 0 until width) {
                     val pixel = bitmap.getPixel(x, y)
-                    // Convert to grayscale: 0.299R + 0.587G + 0.114B
                     val gray = (0.299f * ((pixel shr 16) and 0xFF) +
                             0.587f * ((pixel shr 8) and 0xFF) +
                             0.114f * (pixel and 0xFF)).toInt()
@@ -287,12 +303,10 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 }
             }
 
-            // Calculate a simple threshold using the mean grayscale value
             val meanGray = if (grayValues.isNotEmpty()) grayValues.sum() / grayValues.size else 128
-            val threshold = meanGray - 20 // Lower threshold to capture darker objects like the stove
+            val threshold = meanGray - 20
             Log.d("ObstacleDetection", "Mean Gray: $meanGray, Threshold: $threshold")
 
-            // Step 2: Binarize the image (1 for foreground, 0 for background)
             val binary = Array(lowerRegionHeight) { IntArray(width) }
             for (y in startY until height) {
                 for (x in 0 until width) {
@@ -300,11 +314,10 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                     val gray = (0.299f * ((pixel shr 16) and 0xFF) +
                             0.587f * ((pixel shr 8) and 0xFF) +
                             0.114f * (pixel and 0xFF)).toInt()
-                    binary[y - startY][x] = if (gray < threshold) 1 else 0 // Darker pixels are foreground
+                    binary[y - startY][x] = if (gray < threshold) 1 else 0
                 }
             }
 
-            // Step 3: Find the largest contiguous region using an iterative flood-fill
             var maxRegionSize = 0
             val visited = Array(lowerRegionHeight) { BooleanArray(width) }
             val queue = LinkedList<Pair<Int, Int>>()
@@ -320,7 +333,6 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                             val (currentY, currentX) = queue.poll()
                             regionSize++
 
-                            // Check all four directions
                             for ((dy, dx) in listOf(Pair(-1, 0), Pair(1, 0), Pair(0, -1), Pair(0, 1))) {
                                 val newY = currentY + dy
                                 val newX = currentX + dx
@@ -336,12 +348,10 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 }
             }
 
-            // Step 4: Determine if the largest region indicates an obstacle
             val totalPixels = lowerRegionHeight * width
             val regionProportion = maxRegionSize.toFloat() / totalPixels
             Log.d("ObstacleDetection", "Largest region size: $maxRegionSize, Proportion: $regionProportion")
 
-            // Consider it an obstacle if the region is significant (e.g., >15% of the lower region)
             val proportionThreshold = 0.15f
             val isObstacle = regionProportion > proportionThreshold
             Log.d("ObstacleDetection", "Obstacle detected: $isObstacle")
@@ -349,26 +359,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             return isObstacle
         } catch (e: Exception) {
             Log.e("ObstacleDetection", "Error in detectObstacle: ${e.message}", e)
-            return false // Fallback to avoid crash
+            return false
         }
-    }
-
-    // Helper function: Flood-fill algorithm to find the size of a contiguous region
-    private fun floodFill(binary: Array<IntArray>, visited: Array<BooleanArray>, y: Int, x: Int, height: Int, width: Int): Int {
-        if (y < 0 || y >= height || x < 0 || x >= width || visited[y][x] || binary[y][x] == 0) {
-            return 0
-        }
-
-        visited[y][x] = true
-        var size = 1
-
-        // Recursively check neighboring pixels (4-directional)
-        size += floodFill(binary, visited, y - 1, x, height, width) // Up
-        size += floodFill(binary, visited, y + 1, x, height, width) // Down
-        size += floodFill(binary, visited, y, x - 1, height, width) // Left
-        size += floodFill(binary, visited, y, x + 1, height, width) // Right
-
-        return size
     }
 
     private fun speak(text: String) {
@@ -380,6 +372,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         stopAutoCapture()
         textToSpeech.stop()
         textToSpeech.shutdown()
+        cameraProvider?.unbindAll()
     }
 }
 
@@ -387,36 +380,40 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 fun CameraScreen(
     onCaptureClick: () -> Unit,
     onAutoCaptureClick: () -> Unit,
+    onToggleStreamClick: () -> Unit,
     isAutoCaptureRunning: Boolean,
+    isCameraRunning: Boolean,
     lifecycleOwner: LifecycleOwner
 ) {
     val context = LocalContext.current
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .statusBarsPadding() // Handle status bar overlap
-            .navigationBarsPadding(), // Handle navigation bar overlap
+            .statusBarsPadding()
+            .navigationBarsPadding(),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         AndroidView(
             factory = { ctx ->
                 PreviewView(ctx).apply {
-                    scaleType = PreviewView.ScaleType.FILL_CENTER // Make camera preview fill the view
-                    val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-                    cameraProviderFuture.addListener({
-                        val cameraProvider = cameraProviderFuture.get()
-                        val preview = Preview.Builder().build().also {
-                            it.setSurfaceProvider(this.surfaceProvider)
-                        }
-                        val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-                        cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, preview)
-                    }, ContextCompat.getMainExecutor(ctx))
+                    scaleType = PreviewView.ScaleType.FILL_CENTER
+                    if (isCameraRunning) {
+                        val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+                        cameraProviderFuture.addListener({
+                            val cameraProvider = cameraProviderFuture.get()
+                            val preview = Preview.Builder().build().also {
+                                it.setSurfaceProvider(this.surfaceProvider)
+                            }
+                            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+                            cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, preview)
+                        }, ContextCompat.getMainExecutor(ctx))
+                    }
                 }
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f) // Take all available space
+                .weight(1f)
         )
 
         Row(
@@ -427,16 +424,18 @@ fun CameraScreen(
         ) {
             Button(
                 onClick = onCaptureClick,
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f),
+                enabled = isCameraRunning
             ) {
                 Text("Manual Capture")
             }
 
-            Spacer(modifier = Modifier.width(16.dp))
+            Spacer(modifier = Modifier.width(8.dp))
 
             Button(
                 onClick = onAutoCaptureClick,
                 modifier = Modifier.weight(1f),
+                enabled = isCameraRunning,
                 colors = if (isAutoCaptureRunning) {
                     ButtonDefaults.buttonColors(containerColor = Color.Red)
                 } else {
@@ -444,6 +443,20 @@ fun CameraScreen(
                 }
             ) {
                 Text(if (isAutoCaptureRunning) "Stop Auto" else "Start Auto")
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            Button(
+                onClick = onToggleStreamClick,
+                modifier = Modifier.weight(1f),
+                colors = if (isCameraRunning) {
+                    ButtonDefaults.buttonColors(containerColor = Color.Gray)
+                } else {
+                    ButtonDefaults.buttonColors()
+                }
+            ) {
+                Text(if (isCameraRunning) "Stop Stream" else "Start Stream")
             }
         }
     }
