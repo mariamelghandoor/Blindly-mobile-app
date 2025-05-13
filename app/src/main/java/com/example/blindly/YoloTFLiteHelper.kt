@@ -8,8 +8,7 @@ import org.tensorflow.lite.Interpreter
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import kotlin.math.max
-import kotlin.math.min
+
 
 data class DetectionResult(
     val boundingBox: RectF,
@@ -30,9 +29,9 @@ class YoloTFLiteHelper(context: Context, modelFileName: String) {
             val assetFileDescriptor = context.assets.openFd(modelFileName)
             val inputStream: InputStream = assetFileDescriptor.createInputStream()
             val byteBuffer = convertStreamToByteBuffer(inputStream)
-            val options = Interpreter.Options().apply {
-                setUseNNAPI(true) // Enable NNAPI
-            }
+//            val options = Interpreter.Options().apply {
+//                setUseNNAPI(true) // Enable NNAPI
+//            }
             interpreter = Interpreter(byteBuffer)
             Log.d("YoloTFLiteHelper", "Model: $modelFileName, Input shape: ${interpreter.getInputTensor(0).shape().contentToString()}")
             Log.d("YoloTFLiteHelper", "Model: $modelFileName, Input type: ${interpreter.getInputTensor(0).dataType()}")

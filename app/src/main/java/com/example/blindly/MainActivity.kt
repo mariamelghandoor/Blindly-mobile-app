@@ -30,6 +30,13 @@ import java.io.File
 import java.util.*
 import kotlin.math.abs
 import java.util.LinkedList
+import android.os.Handler
+import android.os.Looper
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.layout.Row
 
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
@@ -42,6 +49,36 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private val HINGED_CLASS = 1
     private val KNOB_CLASS = 2
     private val LEVER_CLASS = 3
+    // Add these properties to MainActivity class
+    private var isAutoCaptureRunning = false
+    private val autoCaptureHandler = Handler(Looper.getMainLooper())
+    private val autoCaptureRunnable = object : Runnable {
+        override fun run() {
+            if (isAutoCaptureRunning) {
+                takePhoto()
+                autoCaptureHandler.postDelayed(this, 5000) // 5 seconds
+            }
+        }
+    }
+
+    // Add these functions to MainActivity class
+    private fun startAutoCapture() {
+        if (!isAutoCaptureRunning) {
+            isAutoCaptureRunning = true
+            autoCaptureHandler.postDelayed(autoCaptureRunnable, 5000)
+            Toast.makeText(this, "Auto capture started", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun stopAutoCapture() {
+        if (isAutoCaptureRunning) {
+            isAutoCaptureRunning = false
+            autoCaptureHandler.removeCallbacks(autoCaptureRunnable)
+            Toast.makeText(this, "Auto capture stopped", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Update onDestroy to stop auto capture
 
     // Request camera permissions at runtime
     private val requestPermissionLauncher =
@@ -66,6 +103,14 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         setContent {
             CameraScreen(
                 onCaptureClick = { takePhoto() },
+                onAutoCaptureClick = {
+                    if (isAutoCaptureRunning) {
+                        stopAutoCapture()
+                    } else {
+                        startAutoCapture()
+                    }
+                },
+                isAutoCaptureRunning = isAutoCaptureRunning,
                 lifecycleOwner = this
             )
         }
@@ -112,6 +157,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
         }, ContextCompat.getMainExecutor(this))
     }
+
 
     private fun takePhoto() {
         val photoFile = File(externalCacheDir, "photo.jpg")
@@ -331,22 +377,32 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     override fun onDestroy() {
         super.onDestroy()
+        stopAutoCapture()
         textToSpeech.stop()
         textToSpeech.shutdown()
     }
 }
 
 @Composable
-fun CameraScreen(onCaptureClick: () -> Unit, lifecycleOwner: LifecycleOwner) {
+fun CameraScreen(
+    onCaptureClick: () -> Unit,
+    onAutoCaptureClick: () -> Unit,
+    isAutoCaptureRunning: Boolean,
+    lifecycleOwner: LifecycleOwner
+) {
     val context = LocalContext.current
     Column(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding() // Handle status bar overlap
+            .navigationBarsPadding(), // Handle navigation bar overlap
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         AndroidView(
             factory = { ctx ->
                 PreviewView(ctx).apply {
+                    scaleType = PreviewView.ScaleType.FILL_CENTER // Make camera preview fill the view
                     val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
                     cameraProviderFuture.addListener({
                         val cameraProvider = cameraProviderFuture.get()
@@ -360,11 +416,35 @@ fun CameraScreen(onCaptureClick: () -> Unit, lifecycleOwner: LifecycleOwner) {
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .height(400.dp)
+                .weight(1f) // Take all available space
         )
-        Spacer(modifier = Modifier.height(16.dp))
-        Button(onClick = onCaptureClick) {
-            Text("Capture Photo")
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            Button(
+                onClick = onCaptureClick,
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Manual Capture")
+            }
+
+            Spacer(modifier = Modifier.width(16.dp))
+
+            Button(
+                onClick = onAutoCaptureClick,
+                modifier = Modifier.weight(1f),
+                colors = if (isAutoCaptureRunning) {
+                    ButtonDefaults.buttonColors(containerColor = Color.Red)
+                } else {
+                    ButtonDefaults.buttonColors()
+                }
+            ) {
+                Text(if (isAutoCaptureRunning) "Stop Auto" else "Start Auto")
+            }
         }
     }
 }
