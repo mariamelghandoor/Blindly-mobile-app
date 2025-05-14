@@ -1,4 +1,3 @@
-
 package com.example.blindly
 
 import android.Manifest
@@ -18,12 +17,14 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -31,14 +32,9 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import java.io.File
 import java.util.*
-import kotlin.math.abs
 import java.util.LinkedList
 import android.os.Handler
 import android.os.Looper
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.ui.graphics.Color
 
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
@@ -48,17 +44,14 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private var cameraProvider: ProcessCameraProvider? = null
     private var isCameraRunning = false
 
-    // Class indices for doordetectionyolo11_float32.tflite (from data.yaml)
+    // Class index for the single-class model
     private val DOOR_CLASS = 0
-    private val HINGED_CLASS = 1
-    private val KNOB_CLASS = 2
-    private val LEVER_CLASS = 3
 
     private var isAutoCaptureRunning = false
     private val autoCaptureHandler = Handler(Looper.getMainLooper())
     private val autoCaptureRunnable = object : Runnable {
         override fun run() {
-            if (isAutoCaptureRunning && isCameraRunning) { // Check camera state
+            if (isAutoCaptureRunning && isCameraRunning) {
                 takePhoto()
                 autoCaptureHandler.postDelayed(this, 5000) // 5 seconds
             }
@@ -68,7 +61,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private fun startAutoCapture() {
         if (!isAutoCaptureRunning) {
             isAutoCaptureRunning = true
-            autoCaptureHandler.postDelayed(autoCaptureRunnable, 5000)
+            autoCaptureHandler.postDelayed(autoCaptureRunnable, 10000)
             Toast.makeText(this, "Auto capture started", Toast.LENGTH_SHORT).show()
         }
     }
@@ -93,11 +86,11 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        yoloHelper = YoloTFLiteHelper(this, "doordetectionyolo11_float32.tflite")
+        yoloHelper = YoloTFLiteHelper(this, "yolo12s.tflite")
         textToSpeech = TextToSpeech(this, this)
 
         setContent {
-            val isCameraRunning = remember { mutableStateOf(true) }
+            val isCameraRunningState = remember { mutableStateOf(true) }
             CameraScreen(
                 onCaptureClick = { takePhoto() },
                 onAutoCaptureClick = {
@@ -108,16 +101,16 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                     }
                 },
                 onToggleStreamClick = {
-                    if (isCameraRunning.value) {
+                    if (isCameraRunningState.value) {
                         stopCamera()
-                        isCameraRunning.value = false
+                        isCameraRunningState.value = false
                     } else {
                         restartCamera()
-                        isCameraRunning.value = true
+                        isCameraRunningState.value = true
                     }
                 },
                 isAutoCaptureRunning = isAutoCaptureRunning,
-                isCameraRunning = isCameraRunning.value,
+                isCameraRunning = isCameraRunningState.value,
                 lifecycleOwner = this
             )
         }
@@ -161,7 +154,6 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 imageCapture
             )
             isCameraRunning = true
-            // Resume auto-capture if it was running
             if (isAutoCaptureRunning) {
                 autoCaptureHandler.postDelayed(autoCaptureRunnable, 5000)
             }
@@ -169,15 +161,21 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun stopCamera() {
-        cameraProvider?.unbindAll()
-        isCameraRunning = false
-        stopAutoCapture() // Stop auto-capture when camera is stopped
-        Toast.makeText(this, "Camera stream stopped", Toast.LENGTH_SHORT).show()
+        runOnUiThread {
+            cameraProvider?.unbindAll()
+            isCameraRunning = false
+            stopAutoCapture()
+            Toast.makeText(this, "Camera stopped", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun restartCamera() {
-        startCamera()
-        Toast.makeText(this, "Camera stream started", Toast.LENGTH_SHORT).show()
+        runOnUiThread {
+            if (!isCameraRunning) {
+                startCamera()
+                Toast.makeText(this, "Camera started", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     private fun takePhoto() {
@@ -215,7 +213,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private fun processImage(bitmap: Bitmap) {
         try {
             if (detectObstacle(bitmap)) {
-                Log.d("ObstacleDetection", "Obstacle detected in lower region")
+                Log.d("ObstacleDetection    ", "Obstacle detected in lower region")
                 speak("Obstacle detected ahead. Stop immediately.")
                 Toast.makeText(this, "Obstacle detected", Toast.LENGTH_SHORT).show()
                 return
@@ -224,59 +222,27 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             Log.d("Debug", "Starting detection with doordetectionyolo11_float32.tflite on bitmap ${bitmap.width}x${bitmap.height}")
             val results = yoloHelper.detect(bitmap)
             if (results.isEmpty()) {
-                Log.d("DetectionResult", "No objects detected")
-                Toast.makeText(this, "No objects detected", Toast.LENGTH_SHORT).show()
+                Log.d("DetectionResult", "No door detected")
+                Toast.makeText(this, "No door detected", Toast.LENGTH_SHORT).show()
                 speak("No door detected in sight. Try turning or walking.")
             } else {
-                var doorDetected = false
-                var knobDetected = false
-                var leverDetected = false
-                for (result in results) {
-                    Log.d("DetectionResult", "Class: ${result.classIndex}, Score: ${result.score}, Box: ${result.boundingBox}")
-                    when (result.classIndex) {
-                        DOOR_CLASS -> doorDetected = true
-                        KNOB_CLASS -> knobDetected = true
-                        LEVER_CLASS -> leverDetected = true
-                    }
-                }
-
-                if (doorDetected) {
-                    val centerX = results.first { it.classIndex == DOOR_CLASS }.boundingBox.centerX()
+                val doorResult = results.firstOrNull { it.classIndex == DOOR_CLASS }
+                if (doorResult != null) {
+                    val centerX = doorResult.boundingBox.centerX()
                     val imageWidth = bitmap.width
-                    Log.d("PositionDebug", "Door detected: centerX=$centerX, imageWidth=$imageWidth, centerX/imageWidth=${centerX/imageWidth}")
-                    if (centerX < imageWidth / 5) {
-                        speak("Door detected on the left. Turn slightly left and walk forward.")
-                    } else if (centerX > 4 * imageWidth / 5) {
-                        speak("Door detected on the right. Turn slightly right and walk forward.")
-                    } else {
-                        speak("Door detected ahead. Walk straight forward.")
+                    Log.d("PositionDebug", "Door detected: centerX=$centerX, imageWidth=$imageWidth, score=${doorResult.score}")
+                    val speechText = when {
+                        centerX < imageWidth / 5 -> "Door detected with high probability on the left. Turn slightly left and walk forward."
+                        centerX > 4 * imageWidth / 5 -> "Door detected with high probability on the right. Turn slightly right and walk forward."
+                        else -> "Door detected with high probability ahead. Walk straight forward."
                     }
-                } else if (knobDetected) {
-                    val centerX = results.first { it.classIndex == KNOB_CLASS }.boundingBox.centerX()
-                    val imageWidth = bitmap.width
-                    Log.d("PositionDebug", "Knob detected: centerX=$centerX, imageWidth=$imageWidth, centerX/imageWidth=${centerX/imageWidth}")
-                    if (centerX < imageWidth / 5) {
-                        speak("Door knob detected on the left. Turn slightly left and approach to open.")
-                    } else if (centerX > 4 * imageWidth / 5) {
-                        speak("Door knob detected on the right. Turn slightly right and approach to open.")
-                    } else {
-                        speak("Door knob detected ahead. Walk forward and prepare to open the door.")
-                    }
-                } else if (leverDetected) {
-                    val centerX = results.first { it.classIndex == LEVER_CLASS }.boundingBox.centerX()
-                    val imageWidth = bitmap.width
-                    Log.d("PositionDebug", "Lever detected: centerX=$centerX, imageWidth=$imageWidth, centerX/imageWidth=${centerX/imageWidth}")
-                    if (centerX < imageWidth / 5) {
-                        speak("Door lever detected on the left. Turn slightly left and approach to open.")
-                    } else if (centerX > 4 * imageWidth / 5) {
-                        speak("Door lever detected on the right. Turn slightly right and approach to open.")
-                    } else {
-                        speak("Door lever detected ahead. Walk forward and prepare to open the door.")
-                    }
+                    speak(speechText)
+                    Toast.makeText(this, "Door detected (score: ${String.format("%.2f", doorResult.score)})", Toast.LENGTH_SHORT).show()
                 } else {
-                    speak("No actionable objects detected. Try turning or walking.")
+                    Log.d("DetectionResult", "Unexpected class detected")
+                    Toast.makeText(this, "Unexpected detection", Toast.LENGTH_SHORT).show()
+                    speak("No door detected. Try turning or walking.")
                 }
-                Toast.makeText(this, "${results.size} objects detected", Toast.LENGTH_SHORT).show()
             }
         } catch (e: Exception) {
             Log.e("DetectionError", "YOLO detection failed: ${e.message}", e)
