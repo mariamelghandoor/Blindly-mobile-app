@@ -17,14 +17,12 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -32,20 +30,42 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import java.io.File
 import java.util.*
-import java.util.LinkedList
 import android.os.Handler
 import android.os.Looper
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.ui.graphics.Color
+import kotlin.math.min
 
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
-    private lateinit var yoloHelper: YoloTFLiteHelper
+    private lateinit var doorYoloHelper: YoloTFLiteHelper
+    private lateinit var obstacleYoloHelper: YoloTFLiteHelper
+    private lateinit var midasHelper: MidasTFLiteHelper
     private lateinit var imageCapture: ImageCapture
     private lateinit var textToSpeech: TextToSpeech
     private var cameraProvider: ProcessCameraProvider? = null
     private var isCameraRunning = false
 
-    // Class index for the single-class model
+    // Class indices for doordetectionyolo11_float32.tflite
     private val DOOR_CLASS = 0
+    private val HINGED_CLASS = 1
+    private val KNOB_CLASS = 2
+    private val LEVER_CLASS = 3
+
+    // Example obstacle classes for YOLOv8 (COCO dataset indices, adjust based on your model)
+    private val OBSTACLE_CLASSES = setOf(
+        0,  // person
+        56, // chair
+        57, // couch
+        58, // potted plant
+        59, // bed
+        60, // dining table
+        62, // tv
+        63, // laptop
+        65  // refrigerator
+    )
 
     private var isAutoCaptureRunning = false
     private val autoCaptureHandler = Handler(Looper.getMainLooper())
@@ -53,7 +73,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         override fun run() {
             if (isAutoCaptureRunning && isCameraRunning) {
                 takePhoto()
-                autoCaptureHandler.postDelayed(this, 5000) // 5 seconds
+                autoCaptureHandler.postDelayed(this, 5000)
             }
         }
     }
@@ -61,7 +81,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private fun startAutoCapture() {
         if (!isAutoCaptureRunning) {
             isAutoCaptureRunning = true
-            autoCaptureHandler.postDelayed(autoCaptureRunnable, 10000)
+            autoCaptureHandler.postDelayed(autoCaptureRunnable, 5000)
             Toast.makeText(this, "Auto capture started", Toast.LENGTH_SHORT).show()
         }
     }
@@ -86,11 +106,13 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        yoloHelper = YoloTFLiteHelper(this, "yolo12s.tflite")
+        doorYoloHelper = YoloTFLiteHelper(this, "doordetectionyolo11_float32.tflite", inputSize = 1280)
+        obstacleYoloHelper = YoloTFLiteHelper(this, "yolov8n_float32.tflite", inputSize = 640)
+        midasHelper = MidasTFLiteHelper(this, "MiDas.tflite")
         textToSpeech = TextToSpeech(this, this)
 
         setContent {
-            val isCameraRunningState = remember { mutableStateOf(true) }
+            val isCameraRunning = remember { mutableStateOf(true) }
             CameraScreen(
                 onCaptureClick = { takePhoto() },
                 onAutoCaptureClick = {
@@ -101,16 +123,16 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                     }
                 },
                 onToggleStreamClick = {
-                    if (isCameraRunningState.value) {
+                    if (isCameraRunning.value) {
                         stopCamera()
-                        isCameraRunningState.value = false
+                        isCameraRunning.value = false
                     } else {
                         restartCamera()
-                        isCameraRunningState.value = true
+                        isCameraRunning.value = true
                     }
                 },
                 isAutoCaptureRunning = isAutoCaptureRunning,
-                isCameraRunning = isCameraRunningState.value,
+                isCameraRunning = isCameraRunning.value,
                 lifecycleOwner = this
             )
         }
@@ -161,21 +183,15 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun stopCamera() {
-        runOnUiThread {
-            cameraProvider?.unbindAll()
-            isCameraRunning = false
-            stopAutoCapture()
-            Toast.makeText(this, "Camera stopped", Toast.LENGTH_SHORT).show()
-        }
+        cameraProvider?.unbindAll()
+        isCameraRunning = false
+        stopAutoCapture()
+        Toast.makeText(this, "Camera stream stopped", Toast.LENGTH_SHORT).show()
     }
 
     private fun restartCamera() {
-        runOnUiThread {
-            if (!isCameraRunning) {
-                startCamera()
-                Toast.makeText(this, "Camera started", Toast.LENGTH_SHORT).show()
-            }
-        }
+        startCamera()
+        Toast.makeText(this, "Camera stream started", Toast.LENGTH_SHORT).show()
     }
 
     private fun takePhoto() {
@@ -212,117 +228,280 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     private fun processImage(bitmap: Bitmap) {
         try {
-            if (detectObstacle(bitmap)) {
-                Log.d("ObstacleDetection    ", "Obstacle detected in lower region")
-                speak("Obstacle detected ahead. Stop immediately.")
-                Toast.makeText(this, "Obstacle detected", Toast.LENGTH_SHORT).show()
-                return
-            }
+            // First check for obstacles
+            val obstacleDetected = detectObstacle(bitmap)
 
-            Log.d("Debug", "Starting detection with doordetectionyolo11_float32.tflite on bitmap ${bitmap.width}x${bitmap.height}")
-            val results = yoloHelper.detect(bitmap)
-            if (results.isEmpty()) {
-                Log.d("DetectionResult", "No door detected")
-                Toast.makeText(this, "No door detected", Toast.LENGTH_SHORT).show()
-                speak("No door detected in sight. Try turning or walking.")
-            } else {
-                val doorResult = results.firstOrNull { it.classIndex == DOOR_CLASS }
-                if (doorResult != null) {
-                    val centerX = doorResult.boundingBox.centerX()
-                    val imageWidth = bitmap.width
-                    Log.d("PositionDebug", "Door detected: centerX=$centerX, imageWidth=$imageWidth, score=${doorResult.score}")
-                    val speechText = when {
-                        centerX < imageWidth / 5 -> "Door detected with high probability on the left. Turn slightly left and walk forward."
-                        centerX > 4 * imageWidth / 5 -> "Door detected with high probability on the right. Turn slightly right and walk forward."
-                        else -> "Door detected with high probability ahead. Walk straight forward."
-                    }
-                    speak(speechText)
-                    Toast.makeText(this, "Door detected (score: ${String.format("%.2f", doorResult.score)})", Toast.LENGTH_SHORT).show()
+            // Only proceed with door detection if no obstacles were found
+            if (!obstacleDetected) {
+                Log.d("Detection", "No obstacles detected, proceeding with door detection")
+                val results = doorYoloHelper.detect(bitmap)
+
+                if (results.isEmpty()) {
+                    Log.d("DetectionResult", "No objects detected")
+                    speak("No door detected in sight. Try turning or walking.")
                 } else {
-                    Log.d("DetectionResult", "Unexpected class detected")
-                    Toast.makeText(this, "Unexpected detection", Toast.LENGTH_SHORT).show()
-                    speak("No door detected. Try turning or walking.")
+                    var doorDetected = false
+                    var knobDetected = false
+                    var leverDetected = false
+
+                    for (result in results) {
+                        when (result.classIndex) {
+                            DOOR_CLASS -> doorDetected = true
+                            KNOB_CLASS -> knobDetected = true
+                            LEVER_CLASS -> leverDetected = true
+                        }
+                    }
+
+                    if (doorDetected) {
+                        val centerX = results.first { it.classIndex == DOOR_CLASS }.boundingBox.centerX()
+                        val imageWidth = bitmap.width
+                        if (centerX < imageWidth / 5) {
+                            speak("Door detected on the left. Turn slightly left and walk forward.")
+                        } else if (centerX > 4 * imageWidth / 5) {
+                            speak("Door detected on the right. Turn slightly right and walk forward.")
+                        } else {
+                            speak("Door detected ahead. Walk straight forward.")
+                        }
+                    } else if (knobDetected) {
+                        val centerX = results.first { it.classIndex == KNOB_CLASS }.boundingBox.centerX()
+                        val imageWidth = bitmap.width
+                        Log.d("PositionDebug", "Knob detected: centerX=$centerX, imageWidth=$imageWidth")
+                        if (centerX < imageWidth / 5) {
+                            speak("Door knob detected on the left. Turn slightly left and approach to open.")
+                        } else if (centerX > 4 * imageWidth / 5) {
+                            speak("Door knob detected on the right. Turn slightly right and approach to open.")
+                        } else {
+                            speak("Door knob detected ahead. Walk forward and prepare to open the door.")
+                        }
+                    } else if (leverDetected) {
+                        val centerX = results.first { it.classIndex == LEVER_CLASS }.boundingBox.centerX()
+                        val imageWidth = bitmap.width
+                        Log.d("PositionDebug", "Lever detected: centerX=$centerX, imageWidth=$imageWidth")
+                        if (centerX < imageWidth / 5) {
+                            speak("Door lever detected on the left. Turn slightly left and approach to open.")
+                        } else if (centerX > 4 * imageWidth / 5) {
+                            speak("Door lever detected on the right. Turn slightly right and approach to open.")
+                        } else {
+                            speak("Door lever detected ahead. Walk forward and prepare to open the door.")
+                        }
+                    } else {
+                        speak("No actionable objects detected. Try turning or walking.")
+                    }
                 }
+            } else {
+                Log.d("Detection", "Obstacle detected - skipping door detection")
             }
         } catch (e: Exception) {
-            Log.e("DetectionError", "YOLO detection failed: ${e.message}", e)
-            Toast.makeText(this, "Detection failed: ${e.message}", Toast.LENGTH_LONG).show()
+            Log.e("DetectionError", "Detection failed: ${e.message}", e)
             speak("Detection failed. Please try again.")
         }
     }
 
     private fun detectObstacle(bitmap: Bitmap): Boolean {
-        val height = bitmap.height
-        val width = bitmap.width
-        val startY = (height * 0.7).toInt()
-        val lowerRegionHeight = height - startY
-
         try {
-            val grayValues = mutableListOf<Int>()
-            for (y in startY until height) {
-                for (x in 0 until width) {
-                    val pixel = bitmap.getPixel(x, y)
-                    val gray = (0.299f * ((pixel shr 16) and 0xFF) +
-                            0.587f * ((pixel shr 8) and 0xFF) +
-                            0.114f * (pixel and 0xFF)).toInt()
-                    grayValues.add(gray)
+            // Run YOLOv8 for obstacle detection
+            val obstacleResults = obstacleYoloHelper.detect(bitmap)
+            if (obstacleResults.isEmpty()) {
+                Log.d("ObstacleDetection", "No obstacles detected by YOLOv8")
+            } else {
+                Log.d("ObstacleDetection", "YOLOv8 detected ${obstacleResults.size} objects")
+                for (result in obstacleResults) {
+                    Log.d("ObstacleDetection", "Class: ${result.classIndex}, Score: ${result.score}, Box: ${result.boundingBox}")
                 }
             }
 
-            val meanGray = if (grayValues.isNotEmpty()) grayValues.sum() / grayValues.size else 128
-            val threshold = meanGray - 20
-            Log.d("ObstacleDetection", "Mean Gray: $meanGray, Threshold: $threshold")
+            // Get depth map from MiDaS
+            val depthMap = midasHelper.estimateDepth(bitmap)
+            val depthMapWidth = depthMap[0].size
+            val depthMapHeight = depthMap.size
 
-            val binary = Array(lowerRegionHeight) { IntArray(width) }
-            for (y in startY until height) {
-                for (x in 0 until width) {
-                    val pixel = bitmap.getPixel(x, y)
-                    val gray = (0.299f * ((pixel shr 16) and 0xFF) +
-                            0.587f * ((pixel shr 8) and 0xFF) +
-                            0.114f * (pixel and 0xFF)).toInt()
-                    binary[y - startY][x] = if (gray < threshold) 1 else 0
-                }
-            }
+            // Process obstacles with depth information
+            var nearestObstacle: DetectionResult? = null
+            var minDepth = Float.MAX_VALUE
+            var obstacleDirection = ""
+            val imageWidth = bitmap.width
+            val imageHeight = bitmap.height
+            val originalAspectRatio = imageWidth.toFloat() / imageHeight
 
-            var maxRegionSize = 0
-            val visited = Array(lowerRegionHeight) { BooleanArray(width) }
-            val queue = LinkedList<Pair<Int, Int>>()
+            // Preprocess bitmap for centered 640x640 with padding
+            val resizedBitmap = Bitmap.createBitmap(640, 640, Bitmap.Config.ARGB_8888)
+            val canvas = android.graphics.Canvas(resizedBitmap)
+            val scale = min(640f / imageWidth, 640f / imageHeight)
+            val newWidth = (imageWidth * scale).toInt()
+            val newHeight = (imageHeight * scale).toInt()
+            val left = (640 - newWidth) / 2
+            val top = (640 - newHeight) / 2
+            canvas.drawBitmap(Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true), left.toFloat(), top.toFloat(), null)
 
-            for (y in 0 until lowerRegionHeight) {
-                for (x in 0 until width) {
-                    if (binary[y][x] == 1 && !visited[y][x]) {
-                        queue.offer(Pair(y, x))
-                        visited[y][x] = true
-                        var regionSize = 0
+            for (result in obstacleResults) {
+                if (result.score > 0.2f) { // Lowered to 0.2 to catch table
+                    // Include high-confidence unknown objects or potential tables
+                    val isObstacleClass = result.classIndex in OBSTACLE_CLASSES ||
+                            (result.score > 0.6f && result.boundingBox.height() > 0.1f * imageHeight) // Heuristic for table
+                    if (isObstacleClass) {
+                        val box = result.boundingBox
+                        // Scale bounding box to depth map coordinates
+                        val left = (box.left * depthMapWidth / imageWidth).toInt().coerceIn(0, depthMapWidth - 1)
+                        val right = (box.right * depthMapWidth / imageWidth).toInt().coerceIn(0, depthMapWidth - 1)
+                        val top = (box.top * depthMapHeight / imageHeight).toInt().coerceIn(0, depthMapHeight - 1)
+                        val bottom = (box.bottom * depthMapHeight / imageHeight).toInt().coerceIn(0, depthMapHeight - 1)
 
-                        while (queue.isNotEmpty()) {
-                            val (currentY, currentX) = queue.poll()
-                            regionSize++
-
-                            for ((dy, dx) in listOf(Pair(-1, 0), Pair(1, 0), Pair(0, -1), Pair(0, 1))) {
-                                val newY = currentY + dy
-                                val newX = currentX + dx
-                                if (newY in 0 until lowerRegionHeight && newX in 0 until width &&
-                                    !visited[newY][newX] && binary[newY][newX] == 1) {
-                                    queue.offer(Pair(newY, newX))
-                                    visited[newY][newX] = true
-                                }
+                        // Calculate average depth in the bounding box
+                        var depthSum = 0f
+                        var pixelCount = 0
+                        for (y in top until bottom) {
+                            for (x in left until right) {
+                                depthSum += depthMap[y][x]
+                                pixelCount++
                             }
                         }
-                        maxRegionSize = maxOf(maxRegionSize, regionSize)
+                        val avgDepth = if (pixelCount > 0) depthSum / pixelCount else Float.MAX_VALUE
+
+                        // Update nearest obstacle with proximity alert
+                        if (avgDepth < minDepth) {
+                            minDepth = avgDepth
+                            nearestObstacle = result
+                            val centerX = box.centerX()
+                            obstacleDirection = when {
+                                centerX < imageWidth / 5 -> "left"
+                                centerX > 4 * imageWidth / 5 -> "right"
+                                else -> "ahead"
+                            }
+                            if (avgDepth < 0.5f) { // Imminent obstacle alert
+                                speak("Stop! Obstacle very close ahead, less than half a meter!")
+                                return true
+                            }
+                        }
                     }
                 }
             }
 
-            val totalPixels = lowerRegionHeight * width
-            val regionProportion = maxRegionSize.toFloat() / totalPixels
-            Log.d("ObstacleDetection", "Largest region size: $maxRegionSize, Proportion: $regionProportion")
+            // Fallback: Check lower region with depth, vertical span, and higher threshold
+            if (nearestObstacle == null) {
+                val height = bitmap.height
+                val width = bitmap.width
+                val startY = (height * 0.5).toInt()
+                val lowerRegionHeight = height - startY
 
-            val proportionThreshold = 0.15f
-            val isObstacle = regionProportion > proportionThreshold
-            Log.d("ObstacleDetection", "Obstacle detected: $isObstacle")
+                val grayValues = mutableListOf<Int>()
+                for (y in startY until height) {
+                    for (x in 0 until width) {
+                        val pixel = bitmap.getPixel(x, y)
+                        val gray = (0.299f * ((pixel shr 16) and 0xFF) +
+                                0.587f * ((pixel shr 8) and 0xFF) +
+                                0.114f * (pixel and 0xFF)).toInt()
+                        grayValues.add(gray)
+                    }
+                }
+                val meanGray = grayValues.sum() / grayValues.size
+                val threshold = (meanGray - 20).toInt().coerceIn(0, 255)
 
-            return isObstacle
+                val binary = Array(lowerRegionHeight) { IntArray(width) }
+                val depthValues = Array(lowerRegionHeight) { FloatArray(width) }
+                for (y in startY until height) {
+                    for (x in 0 until width) {
+                        val pixel = bitmap.getPixel(x, y)
+                        val gray = (0.299f * ((pixel shr 16) and 0xFF) +
+                                0.587f * ((pixel shr 8) and 0xFF) +
+                                0.114f * (pixel and 0xFF)).toInt()
+                        val depthY = (y - startY).coerceIn(0, depthMapHeight - 1)
+                        val depthX = (x * depthMapWidth / width).coerceIn(0, depthMapWidth - 1)
+                        val depth = depthMap[depthY][depthX]
+                        binary[y - startY][x] = if (gray < threshold) 1 else 0
+                        depthValues[y - startY][x] = depth
+                    }
+                }
+
+                val visited = Array(lowerRegionHeight) { BooleanArray(width) }
+                val queue = LinkedList<Pair<Int, Int>>()
+                var maxRegionSize = 0
+                var maxRegionDepth = Float.MAX_VALUE
+                var maxVerticalSpan = 0
+
+                for (y in 0 until lowerRegionHeight) {
+                    for (x in 0 until width) {
+                        if (binary[y][x] == 1 && !visited[y][x]) {
+                            queue.offer(Pair(y, x))
+                            visited[y][x] = true
+                            var regionSize = 0
+                            var regionDepthSum = 0f
+                            var regionPixelCount = 0
+                            var minY = y
+                            var maxY = y
+
+                            while (queue.isNotEmpty()) {
+                                val (currentY, currentX) = queue.poll()
+                                regionSize++
+                                regionDepthSum += depthValues[currentY][currentX]
+                                regionPixelCount++
+                                minY = minOf(minY, currentY)
+                                maxY = maxOf(maxY, currentY)
+
+                                for ((dy, dx) in listOf(Pair(-1, 0), Pair(1, 0), Pair(0, -1), Pair(0, 1))) {
+                                    val newY = currentY + dy
+                                    val newX = currentX + dx
+                                    if (newY in 0 until lowerRegionHeight && newX in 0 until width &&
+                                        !visited[newY][newX] && binary[newY][newX] == 1) {
+                                        queue.offer(Pair(newY, newX))
+                                        visited[newY][newX] = true
+                                    }
+                                }
+                            }
+                            val avgRegionDepth = if (regionPixelCount > 0) regionDepthSum / regionPixelCount else Float.MAX_VALUE
+                            val verticalSpan = maxY - minY + 1
+                            if (regionSize > maxRegionSize && avgRegionDepth < 5f && verticalSpan < lowerRegionHeight * 0.8f) {
+                                maxRegionSize = regionSize
+                                maxRegionDepth = avgRegionDepth
+                                maxVerticalSpan = verticalSpan
+                            }
+                        }
+                    }
+                }
+
+                val totalPixels = lowerRegionHeight * width
+                val regionProportion = maxRegionSize.toFloat() / totalPixels
+                Log.d("ObstacleDetection", "Fallback: Proportion: $regionProportion, Depth: $maxRegionDepth m, Vertical Span: $maxVerticalSpan")
+                if (regionProportion > 0.2f && maxRegionDepth < 3f) { // Increased to 20% with depth and span check
+                    val centerX = width / 2f
+                    obstacleDirection = when {
+                        centerX < imageWidth / 5 -> "left"
+                        centerX > 4 * imageWidth / 5 -> "right"
+                        else -> "ahead"
+                    }
+                    speak("Obstacle detected $obstacleDirection. Proceed with caution.")
+                    return true
+                }
+            }
+
+            // Provide feedback for the nearest obstacle
+            if (nearestObstacle != null) {
+                val classIndex = nearestObstacle.classIndex
+                val className = when (classIndex) {
+                    0 -> "person"
+                    56 -> "chair"
+                    57 -> "couch"
+                    58 -> "potted plant"
+                    59 -> "bed"
+                    60 -> "table"
+                    62 -> "TV"
+                    63 -> "laptop"
+                    65 -> "refrigerator"
+                    else -> if (nearestObstacle.score > 0.6f) "unknown obstacle" else "ignored object"
+                }
+                val depthMeters = minDepth.coerceIn(0f, 10f)
+                Log.d("ObstacleDetection", "Nearest obstacle: $className, Depth: $depthMeters m, Direction: $obstacleDirection")
+                Toast.makeText(this, "$className detected at $depthMeters meters", Toast.LENGTH_SHORT).show()
+
+                if (depthMeters < 0.5f) {
+                    speak("Stop! $className very close ahead, less than half a meter!")
+                } else if (depthMeters < 3f) {
+                    speak("$className detected $depthMeters meters $obstacleDirection. Proceed with caution.")
+                }
+                return true
+            }
+
+            Log.d("ObstacleDetection", "No significant obstacles within 3 meters")
+            return false
         } catch (e: Exception) {
             Log.e("ObstacleDetection", "Error in detectObstacle: ${e.message}", e)
             return false

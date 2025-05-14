@@ -15,116 +15,105 @@ data class DetectionResult(
     val classIndex: Int
 )
 
-class YoloTFLiteHelper(context: Context, modelFileName: String) {
+class YoloTFLiteHelper(context: Context, modelFileName: String, inputSize: Int = 640) {
     private val interpreter: Interpreter
-    private val inputSize = 640
-    private val confidenceThreshold = 0.25f // Lowered to capture more detections
+    private val inputSize: Int
+    private val confidenceThreshold = 0.5f
     private val iouThreshold = 0.4f
-    private val numClasses = 1 // Only for door
+    private var numClasses: Int
 
     init {
         try {
+            // Load model from assets folder
             val assetFileDescriptor = context.assets.openFd(modelFileName)
             val inputStream: InputStream = assetFileDescriptor.createInputStream()
             val byteBuffer = convertStreamToByteBuffer(inputStream)
-            val options = Interpreter.Options().apply {
-                setUseNNAPI(true)
-                setNumThreads(4)
-                setUseXNNPACK(true)
+            interpreter = Interpreter(byteBuffer)
+            this.inputSize = inputSize
+
+            // Determine number of classes from output shape
+            val outputShape = interpreter.getOutputTensor(0).shape()
+            numClasses = if (outputShape.size == 3) {
+                outputShape[1] - 4 // Assuming [1, 4+numClasses, N], e.g., 4 for boxes + scores
+            } else {
+                80 // Default to COCO classes for YOLOv8 if shape is unclear
             }
-            interpreter = Interpreter(byteBuffer, options)
-            val inputShape = interpreter.getInputTensor(0).shape().contentToString()
-            val outputShape = interpreter.getOutputTensor(0).shape().contentToString()
-            Log.d("YoloTFLiteHelper", "Model: $modelFileName, Input shape: $inputShape")
+
+            Log.d("YoloTFLiteHelper", "Model: $modelFileName, Input size: $inputSize, Input shape: ${interpreter.getInputTensor(0).shape().contentToString()}")
             Log.d("YoloTFLiteHelper", "Model: $modelFileName, Input type: ${interpreter.getInputTensor(0).dataType()}")
-            Log.d("YoloTFLiteHelper", "Model: $modelFileName, Output shape: $outputShape")
-            if (outputShape != "[1, 5, 8400]") {
-                Log.w("YoloTFLiteHelper", "Unexpected output shape: $outputShape, expected [1, 5, 8400]")
-            }
+            Log.d("YoloTFLiteHelper", "Model: $modelFileName, Output shape: $outputShape.contentToString(), Num classes: $numClasses")
         } catch (e: Exception) {
             throw RuntimeException("Failed to load YOLO model ($modelFileName): ${e.message}", e)
         }
     }
 
-    fun detect(bitmap: Bitmap, bypassNMS: Boolean = false): List<DetectionResult> {
-        return try {
-            val startTime = System.nanoTime()
+    fun detect(bitmap: Bitmap): List<DetectionResult> {
+        try {
+            // Resize and preprocess bitmap
             val resizedBitmap = Bitmap.createScaledBitmap(bitmap, inputSize, inputSize, true)
-            val byteBuffer = ByteBuffer.allocateDirect(1 * inputSize * inputSize * 3 * 4)
-            byteBuffer.order(ByteOrder.nativeOrder())
+            val inputBuffer = convertBitmapToByteBuffer(resizedBitmap)
 
-            val intValues = IntArray(inputSize * inputSize)
-            resizedBitmap.getPixels(intValues, 0, resizedBitmap.width, 0, 0, resizedBitmap.width, resizedBitmap.height)
+            // Prepare output buffer based on model output shape [1, 4+numClasses, N]
+            val outputShape = interpreter.getOutputTensor(0).shape()
+            val outputBuffer = Array(1) { Array(outputShape[1]) { FloatArray(outputShape[2]) } }
 
-            var pixel = 0
-            for (y in 0 until inputSize) {
-                for (x in 0 until inputSize) {
-                    val value = intValues[pixel++]
-                    byteBuffer.putFloat(((value shr 16) and 0xFF) / 255.0f) // R
-                    byteBuffer.putFloat(((value shr 8) and 0xFF) / 255.0f)  // G
-                    byteBuffer.putFloat((value and 0xFF) / 255.0f)         // B
-                }
-            }
+            // Run inference
+            interpreter.run(inputBuffer, outputBuffer)
 
-            val outputBuffer = Array(1) { Array(5) { FloatArray(8400) } }
-            interpreter.run(byteBuffer, outputBuffer)
-
-            // Log sample outputs for debugging
-            for (i in 0 until minOf(5, 8400)) {
-                Log.d("YoloTFLiteHelper", "Output[$i]: x=${outputBuffer[0][0][i]}, y=${outputBuffer[0][1][i]}, " +
-                        "w=${outputBuffer[0][2][i]}, h=${outputBuffer[0][3][i]}, score=${outputBuffer[0][4][i]}")
-            }
-
-            val detections = processOutput(outputBuffer[0])
-            val inferenceTime = (System.nanoTime() - startTime) / 1_000_000.0
-            Log.d("YoloTFLiteHelper", "Inference time: $inferenceTime ms, Detections: ${detections.size}")
-
-            if (bypassNMS) detections else applyNMS(detections)
+            // Process output
+            return processOutput(outputBuffer[0])
         } catch (e: Exception) {
-            Log.e("YoloTFLiteHelper", "Detection failed: ${e.message}", e)
-            emptyList()
+            Log.e("YoloTFLiteHelper", "Detection failed for : ${e.message}", e)
+            return emptyList()
         }
+    }
+
+    private fun convertBitmapToByteBuffer(bitmap: Bitmap): ByteBuffer {
+        val byteBuffer = ByteBuffer.allocateDirect(1 * inputSize * inputSize * 3 * 4) // Float32
+        byteBuffer.order(ByteOrder.nativeOrder())
+
+        val intValues = IntArray(inputSize * inputSize)
+        bitmap.getPixels(intValues, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+
+        for (pixel in intValues) {
+            byteBuffer.putFloat(((pixel shr 16) and 0xFF) / 255.0f) // R
+            byteBuffer.putFloat(((pixel shr 8) and 0xFF) / 255.0f)  // G
+            byteBuffer.putFloat((pixel and 0xFF) / 255.0f)         // B
+        }
+        return byteBuffer
     }
 
     private fun processOutput(output: Array<FloatArray>): List<DetectionResult> {
         val detections = mutableListOf<DetectionResult>()
 
-        for (i in 0 until 8400) {
-            val x = output[0][i]
-            val y = output[1][i]
-            val w = output[2][i]
-            val h = output[3][i]
-            val classScore = output[4][i]
+        // Output shape: [4+numClasses, N] where first 4 are box coordinates, rest are class probabilities
+        for (i in 0 until output[0].size) { // Iterate over N detections
+            val x = output[0][i] * inputSize // Scale if normalized
+            val y = output[1][i] * inputSize
+            val w = output[2][i] * inputSize
+            val h = output[3][i] * inputSize
+            val confidence = output[4][i] // Objectness score
 
-            // Log raw values for low-scoring detections
-            if (classScore > 0.1f && classScore <= confidenceThreshold) {
-                Log.d("YoloTFLiteHelper", "Low score detection[$i]: score=$classScore, x=$x, y=$y, w=$w, h=$h")
+            // Find the class with the highest probability
+            var maxClassScore = 0f
+            var classIndex = -1
+            for (j in 0 until numClasses) {
+                val classScore = output[4 + j][i]
+                if (classScore > maxClassScore) {
+                    maxClassScore = classScore
+                    classIndex = j
+                }
             }
 
-            if (classScore > confidenceThreshold) {
-                // Assume coordinates are normalized [0, 1]; scale to image size
-                val scaledX = x * inputSize
-                val scaledY = y * inputSize
-                val scaledW = w * inputSize
-                val scaledH = h * inputSize
-                val rect = RectF(
-                    scaledX - scaledW / 2,
-                    scaledY - scaledH / 2,
-                    scaledX + scaledW / 2,
-                    scaledY + scaledH / 2
-                )
-                // Validate bounding box
-                if (rect.left >= 0 && rect.top >= 0 && rect.right <= inputSize && rect.bottom <= inputSize) {
-                    detections.add(DetectionResult(rect, classScore, 0))
-                    Log.d("YoloTFLiteHelper", "Valid detection[$i]: score=$classScore, box=$rect")
-                } else {
-                    Log.w("YoloTFLiteHelper", "Invalid box[$i]: score=$classScore, box=$rect")
-                }
+            val score = confidence * maxClassScore
+            if (score > confidenceThreshold) {
+                val rect = RectF(x - w / 2, y - h / 2, x + w / 2, y + h / 2)
+                detections.add(DetectionResult(rect, score, classIndex))
             }
         }
 
-        Log.d("YoloTFLiteHelper", "Total detections before NMS: ${detections.size}")
-        return detections
+        // Apply Non-Max Suppression
+        return applyNMS(detections)
     }
 
     private fun applyNMS(detections: List<DetectionResult>): List<DetectionResult> {
@@ -141,7 +130,6 @@ class YoloTFLiteHelper(context: Context, modelFileName: String) {
             }
             if (keep) selectedDetections.add(det)
         }
-        Log.d("YoloTFLiteHelper", "Detections after NMS: ${selectedDetections.size}")
         return selectedDetections
     }
 
@@ -151,7 +139,7 @@ class YoloTFLiteHelper(context: Context, modelFileName: String) {
         val x2 = minOf(box1.right, box2.right)
         val y2 = minOf(box1.bottom, box2.bottom)
 
-        val intersection = maxOf(0f, x2 - x1) * maxOf(0f, y2 - y1)
+        var intersection = maxOf(0f, x2 - x1) * maxOf(0f, y2 - y1)
         val area1 = (box1.right - box1.left) * (box1.bottom - box1.top)
         val area2 = (box2.right - box2.left) * (box2.bottom - box2.top)
         return if (area1 + area2 - intersection > 0) intersection / (area1 + area2 - intersection) else 0f
