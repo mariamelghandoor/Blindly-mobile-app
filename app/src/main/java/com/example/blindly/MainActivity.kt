@@ -54,7 +54,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private val KNOB_CLASS = 2
     private val LEVER_CLASS = 3
 
-    // Example obstacle classes for YOLOv8 (COCO dataset indices, adjust based on your model)
+    // obstacle classes for YOLOv8 (COCO dataset indices, adjust based on your model)
     private val OBSTACLE_CLASSES = setOf(
         0,  // person
         56, // chair
@@ -334,7 +334,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             canvas.drawBitmap(Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true), left.toFloat(), top.toFloat(), null)
 
             for (result in obstacleResults) {
-                if (result.score > 0.2f) { // Lowered to 0.2 to catch table
+                if (result.score > 0.2f) {
                     // Include high-confidence unknown objects or potential tables
                     val isObstacleClass = result.classIndex in OBSTACLE_CLASSES ||
                             (result.score > 0.6f && result.boundingBox.height() > 0.1f * imageHeight) // Heuristic for table
